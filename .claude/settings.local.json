@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git init *)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(vercel *)",
+      "Bash(node dev-server.js)",
+      "Bash(curl -s \"http://localhost:3001/api/quote?ticker=AAPL\")",
+      "Bash(curl -s \"http://localhost:3001/api/options?ticker=AAPL\")",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); const j=JSON.parse\\(d\\); console.log\\('Price:', j.price, '| Change:', j.priceChange?.toFixed\\(2\\)\\);\")",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); const j=JSON.parse\\(d\\); if\\(j.error\\){console.log\\('ERROR:',j.error\\)}else{console.log\\('ATM IV:',j.atmIV,'| Expirations:',j.expirationDates?.length,'| Options entries:',j.options?.length,'| First expiry calls:',j.options?.[0]?.calls?.length\\);}\")",
+      "Bash(curl -s \"http://localhost:3001/api/history?ticker=AAPL\")",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\); const j=JSON.parse\\(d\\); if\\(j.error\\){console.log\\('ERROR:',j.error\\)}else{console.log\\('Closes:',j.closes?.length,'| Last close:',j.closes?.slice\\(-1\\)[0]\\);}\" kill %1)",
+      "Bash(npx cap *)"
+    ]
+  }
+}

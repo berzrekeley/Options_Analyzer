@@ -1,0 +1,424 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  Search, 
+  TrendingUp, 
+  ShieldAlert, 
+  Info,
+  Target,
+  LayoutDashboard,
+  BarChart3,
+  Loader2,
+  AlertCircle,
+  CalendarDays,
+  ChevronDown,
+  Hash,
+  Activity,
+  Zap,
+  Coins,
+  ArrowUpRight,
+  ArrowDownRight
+} from 'lucide-react';
+
+// --- MATH & DATE UTILITIES ---
+const normalCDF = (x) => {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const d = 0.3989423 * Math.exp(-x * x / 2);
+  const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
+  return x > 0 ? 1 - p : p;
+};
+
+const normalPDF = (x) => Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+
+const calculateGreeks = (S, K, T, r, sigma, type = 'put') => {
+  if (T <= 0 || K <= 0) return { price: Math.max(0, type === 'call' ? S - K : K - S), delta: 0, theta: 0, gamma: 0, vega: 0 };
+  
+  const d1 = (Math.log(S / K) + (r + (sigma ** 2) / 2) * T) / (sigma * Math.sqrt(T));
+  const d2 = d1 - sigma * Math.sqrt(T);
+
+  const price = type === 'call' 
+    ? S * normalCDF(d1) - K * Math.exp(-r * T) * normalCDF(d2)
+    : K * Math.exp(-r * T) * normalCDF(-d2) - S * normalCDF(-d1);
+
+  let delta = type === 'call' ? normalCDF(d1) : normalCDF(d1) - 1;
+  const gamma = normalPDF(d1) / (S * sigma * Math.sqrt(T));
+  const vega = (S * normalPDF(d1) * Math.sqrt(T)) / 100;
+  const theta = (-(S * normalPDF(d1) * sigma) / (2 * Math.sqrt(T)) - r * K * Math.exp(-r * T) * normalCDF(type === 'call' ? d2 : -d2)) / 365;
+
+  const spreadPercent = price > 5 ? 0.01 : 0.03; 
+  const bid = price * (1 - spreadPercent);
+  const ask = price * (1 + spreadPercent);
+
+  return { price, delta, gamma, vega, theta, bid, ask };
+};
+
+const getAvailableExpirations = (minDays = 20, maxDays = 65) => {
+  const dates = [];
+  const today = new Date();
+  for (let i = minDays; i <= maxDays; i++) {
+    const checkDate = new Date();
+    checkDate.setDate(today.getDate() + i);
+    if (checkDate.getDay() === 5) {
+      dates.push({
+        dte: i,
+        formatted: checkDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        iso: checkDate.toISOString().split('T')[0]
+      });
+    }
+  }
+  return dates;
+};
+
+const App = () => {
+  const [activeTab, setActiveTab] = useState('calc');
+  const [matrixType, setMatrixType] = useState('put');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [optionType, setOptionType] = useState('put');
+  
+  const availableExpirations = useMemo(() => getAvailableExpirations(20, 65), []);
+
+  const [params, setParams] = useState({
+    ticker: 'AAPL',
+    companyName: 'Apple Inc.',
+    stockPrice: 185.92,
+    priceChange: 2.45,
+    priceChangePercent: 1.34,
+    strikePrice: 175,
+    dte: availableExpirations[2]?.dte || 45, 
+    iv: 0.22,
+    hv: 0.18,
+    riskFreeRate: 0.045,
+    ivHigh: 0.35,
+    ivLow: 0.15,
+  });
+
+  const handleSearch = async (e) => {
+    e.preventDefault();
+    if (!searchQuery) return;
+    
+    setIsLoading(true);
+    setError(null);
+    const apiKey = ""; 
+
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `Provide current market data for ${searchQuery}. Return only JSON with keys: ticker, name, price, priceChange, priceChangePercent, iv, hv, ivLow, ivHigh.` }] }],
+            systemInstruction: { parts: [{ text: "You are a financial data API. Always return valid JSON." }] },
+            generationConfig: { responseMimeType: "application/json" }
+          })
+        }
+      );
+      
+      const result = await response.json();
+      const data = JSON.parse(result.candidates[0].content.parts[0].text);
+      
+      setParams(prev => ({
+        ...prev,
+        ticker: data.ticker || prev.ticker,
+        companyName: data.name || prev.name,
+        stockPrice: data.price || prev.price,
+        priceChange: data.priceChange || 0,
+        priceChangePercent: data.priceChangePercent || 0,
+        strikePrice: Math.round(data.price * (optionType === 'put' ? 0.95 : 1.05)), 
+        iv: data.iv || prev.iv,
+        hv: data.hv || data.iv * 0.85,
+        ivLow: data.ivLow || 0.15,
+        ivHigh: data.ivHigh || 0.40,
+      }));
+      setSearchQuery('');
+    } catch (err) {
+      setError("Failed to fetch market data.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const results = useMemo(() => {
+    const T = params.dte / 365;
+    const greeks = calculateGreeks(params.stockPrice, params.strikePrice, T, params.riskFreeRate, params.iv, optionType);
+    const ivRank = ((params.iv - params.ivLow) / (params.ivHigh - params.ivLow)) * 100;
+    const expectedMove = params.stockPrice * params.iv * Math.sqrt(T);
+    const expObj = availableExpirations.find(e => e.dte === params.dte) || { formatted: "Custom Date" };
+    return { ...greeks, ivRank, expectedMove, expirationDate: expObj.formatted };
+  }, [params, optionType, availableExpirations]);
+
+  const chainSummary = useMemo(() => {
+    const targetDtes = availableExpirations; 
+    const multipliers = [0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15];
+    const strikes = multipliers.map(m => Math.round(params.stockPrice * m));
+    const chain = [];
+    targetDtes.forEach(d => {
+      strikes.forEach(s => {
+        const g = calculateGreeks(params.stockPrice, s, d.dte/365, params.riskFreeRate, params.iv, matrixType);
+        chain.push({ dte: d.dte, expirationDate: d.formatted, strike: s, ...g });
+      });
+    });
+    return chain;
+  }, [params.stockPrice, params.iv, params.riskFreeRate, availableExpirations, matrixType]);
+
+  const isPositive = params.priceChange >= 0;
+
+  return (
+    <div className="min-h-screen bg-[#f8fafc] text-slate-900 font-sans p-4 md:p-8">
+      <div className="max-w-6xl mx-auto space-y-4">
+        
+        {/* Header with Search & Navigation */}
+        <header className="bg-white p-4 rounded-2xl border shadow-sm flex flex-col md:flex-row items-center gap-6">
+          <form onSubmit={handleSearch} className="relative w-full md:w-80">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+            <input 
+              type="text" 
+              placeholder="Search Ticker..."
+              className="w-full pl-10 pr-4 py-2 bg-slate-50 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-sm font-medium"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value.toUpperCase())}
+            />
+            {isLoading && <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 animate-spin text-indigo-500" />}
+          </form>
+          
+          <div className="flex items-center gap-3 border-l pl-6 border-slate-100">
+            <div className="h-10 w-10 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold shadow-md shrink-0">
+              {params.ticker[0]}
+            </div>
+            <div>
+              <h2 className="font-bold leading-none text-slate-800 text-lg">{params.ticker}</h2>
+              <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">{params.companyName}</p>
+            </div>
+          </div>
+
+          <nav className="ml-auto flex gap-1 p-1 bg-slate-100 rounded-xl border">
+            <button 
+              onClick={() => setActiveTab('calc')}
+              className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'calc' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:bg-slate-200'}`}
+            >
+              <LayoutDashboard className="w-3.5 h-3.5" /> Dashboard
+            </button>
+            <button 
+              onClick={() => setActiveTab('summary')}
+              className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeTab === 'summary' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:bg-slate-200'}`}
+            >
+              <BarChart3 className="w-3.5 h-3.5" /> Chain Matrix
+            </button>
+          </nav>
+        </header>
+
+        {/* REARRANGED MARKET DATA AREA */}
+        <div className="space-y-3">
+          {/* Row 1: Spot Price & Change */}
+          <div className="bg-white p-4 rounded-2xl border shadow-sm flex flex-wrap items-end gap-6">
+            <div className="space-y-1">
+              <span className="text-[10px] font-black text-slate-400 block uppercase tracking-tighter">Current Spot</span>
+              <div className="flex items-center gap-2">
+                <span className="text-3xl font-black text-slate-900 tracking-tight">${params.stockPrice.toFixed(2)}</span>
+              </div>
+            </div>
+            
+            <div className="pb-1.5">
+              <div className={`flex items-center gap-1.5 px-3 py-1 rounded-lg border font-bold ${isPositive ? 'bg-emerald-50 border-emerald-100 text-emerald-600' : 'bg-rose-50 border-rose-100 text-rose-600'}`}>
+                {isPositive ? <ArrowUpRight className="w-4 h-4" /> : <ArrowDownRight className="w-4 h-4" />}
+                <span className="text-sm">{isPositive ? '+' : ''}{params.priceChange.toFixed(2)}</span>
+                <span className="text-xs opacity-70">({isPositive ? '+' : ''}{params.priceChangePercent.toFixed(2)}%)</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Row 2: Volatility Metrics - UPDATED IV RANK STYLE */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="bg-white px-4 py-3 rounded-xl border shadow-sm flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-1.5 bg-slate-100 rounded-lg">
+                  <Zap className="w-4 h-4 text-slate-600" />
+                </div>
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">IV Rank</span>
+              </div>
+              <span className="text-xl font-black text-slate-900">{results.ivRank.toFixed(1)}%</span>
+            </div>
+
+            <div className="bg-white px-4 py-3 rounded-xl border shadow-sm flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-1.5 bg-slate-100 rounded-lg">
+                  <TrendingUp className="w-4 h-4 text-slate-600" />
+                </div>
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Implied Vol</span>
+              </div>
+              <span className="text-xl font-black text-slate-900">{(params.iv * 100).toFixed(1)}%</span>
+            </div>
+
+            <div className="bg-white px-4 py-3 rounded-xl border shadow-sm flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="p-1.5 bg-slate-100 rounded-lg">
+                  <Activity className="w-4 h-4 text-slate-600" />
+                </div>
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">30D Hist Vol</span>
+              </div>
+              <span className="text-xl font-black text-slate-900">{(params.hv * 100).toFixed(1)}%</span>
+            </div>
+          </div>
+        </div>
+
+        {error && (
+          <div className="bg-rose-50 border border-rose-100 text-rose-600 p-4 rounded-xl flex items-center gap-3">
+            <AlertCircle className="w-5 h-5" /> {error}
+          </div>
+        )}
+
+        {/* Tab Content */}
+        {activeTab === 'calc' ? (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="space-y-6">
+              <div className="bg-white p-6 rounded-2xl border shadow-sm space-y-4">
+                <div className="flex justify-between items-center mb-2">
+                  <h3 className="font-bold text-slate-700 text-sm">Contract Config</h3>
+                  <div className="flex bg-slate-100 p-1 rounded-md text-[10px]">
+                    <button onClick={() => setOptionType('put')} className={`px-3 py-1 rounded transition-all ${optionType === 'put' ? 'bg-white shadow-sm font-bold text-indigo-600' : 'text-slate-400'}`}>PUT</button>
+                    <button onClick={() => setOptionType('call')} className={`px-3 py-1 rounded transition-all ${optionType === 'call' ? 'bg-white shadow-sm font-bold text-indigo-600' : 'text-slate-400'}`}>CALL</button>
+                  </div>
+                </div>
+                
+                <div className="space-y-4">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1">
+                      <Hash className="w-3 h-3" /> Strike Price
+                    </label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 font-bold">$</span>
+                      <input 
+                        type="number"
+                        value={params.strikePrice} 
+                        onChange={e => setParams({...params, strikePrice: parseFloat(e.target.value) || 0})}
+                        className="w-full pl-7 pr-4 py-2.5 bg-slate-50 border rounded-xl font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-bold text-slate-400 uppercase">Expiration</label>
+                    <div className="relative">
+                      <select 
+                        value={params.dte}
+                        onChange={e => setParams({...params, dte: parseInt(e.target.value)})}
+                        className="w-full p-2.5 bg-slate-50 border rounded-xl font-bold appearance-none cursor-pointer focus:ring-2 focus:ring-indigo-500 outline-none"
+                      >
+                        {availableExpirations.map(exp => (
+                          <option key={exp.dte} value={exp.dte}>{exp.formatted} ({exp.dte} Days)</option>
+                        ))}
+                      </select>
+                      <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-indigo-900 text-white p-6 rounded-2xl shadow-xl relative overflow-hidden">
+                <ShieldAlert className="absolute -right-4 -bottom-4 w-24 h-24 text-white/10 rotate-12" />
+                <h3 className="font-bold flex items-center gap-2 mb-4 text-sm uppercase tracking-widest"><Target className="w-4 h-4" /> Strategy Outlook</h3>
+                <div className="space-y-3 relative z-10">
+                   <div className={`p-2.5 rounded-lg text-xs border ${results.ivRank > 50 ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200' : 'bg-white/5 border-white/10 text-slate-300'}`}>
+                    {results.ivRank > 50 ? "✓ High IV Rank: Sell Premium" : "⚠ Low IV Rank: Buying Preferred"}
+                  </div>
+                  <div className={`p-2.5 rounded-lg text-xs border ${params.dte >= 30 && params.dte <= 50 ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-200' : 'bg-white/5 border-white/10 text-slate-300'}`}>
+                    {params.dte >= 30 && params.dte <= 50 ? "✓ Institutional DTE Window" : "⚠ Non-Standard DTE Selection"}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="lg:col-span-2 space-y-6">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="bg-white p-4 rounded-xl border shadow-sm">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Bid / Ask</p>
+                  <p className="text-lg font-bold text-slate-900 font-mono">${results.bid.toFixed(2)} / ${results.ask.toFixed(2)}</p>
+                </div>
+                <div className="bg-white p-4 rounded-xl border shadow-sm">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Delta</p>
+                  <p className="text-2xl font-bold text-indigo-600 font-mono">{results.delta.toFixed(3)}</p>
+                </div>
+                <div className="bg-white p-4 rounded-xl border shadow-sm">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Theta/Day</p>
+                  <p className="text-2xl font-bold text-emerald-600 font-mono">${(results.theta * 100).toFixed(2)}</p>
+                </div>
+                <div className="bg-white p-4 rounded-xl border shadow-sm">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">1SD Move</p>
+                  <p className="text-2xl font-bold text-slate-900 font-mono">±${results.expectedMove.toFixed(2)}</p>
+                </div>
+              </div>
+
+              {/* Range Chart */}
+              <div className="bg-white p-8 rounded-2xl border shadow-sm">
+                <div className="flex justify-between items-center mb-10">
+                  <h3 className="font-bold text-slate-700">68% Probable Range</h3>
+                  <span className="text-[10px] bg-slate-100 px-2 py-1 rounded text-slate-500 font-bold uppercase tracking-widest">{results.expirationDate}</span>
+                </div>
+                <div className="relative py-12 px-6">
+                  <div className="h-1.5 w-full bg-slate-100 rounded-full relative">
+                    <div className="absolute top-0 h-full bg-indigo-500/10 border-x border-indigo-400/20" style={{ left: '25%', width: '50%' }} />
+                    <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-8 bg-slate-300"></div>
+                    
+                    <div className="absolute top-1/2 left-[25%] -translate-x-1/2 -translate-y-1/2 text-center">
+                      <div className="w-px h-10 border-l border-dashed border-indigo-300 mx-auto"></div>
+                      <span className="text-[10px] font-bold text-indigo-500 block mt-4">${(params.stockPrice - results.expectedMove).toFixed(2)}</span>
+                    </div>
+
+                    <div className="absolute top-1/2 left-[75%] -translate-x-1/2 -translate-y-1/2 text-center">
+                      <div className="w-px h-10 border-l border-dashed border-indigo-300 mx-auto"></div>
+                      <span className="text-[10px] font-bold text-indigo-500 block mt-4">${(params.stockPrice + results.expectedMove).toFixed(2)}</span>
+                    </div>
+
+                    <div className="absolute top-1/2 -translate-y-1/2 flex flex-col items-center" style={{ left: `${50 + ((params.strikePrice - params.stockPrice) / (results.expectedMove * 2)) * 50}%` }}>
+                      <div className={`w-4 h-4 rounded-full border-2 border-white shadow-md ${optionType === 'put' ? 'bg-rose-500' : 'bg-emerald-500'}`}></div>
+                      <span className="text-[10px] font-black text-slate-900 absolute -top-8 bg-white border px-2 py-1 rounded-md shadow-sm">${params.strikePrice}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-white rounded-2xl border shadow-sm overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-500">
+            <div className="p-6 border-b bg-slate-50/50 flex justify-between items-center">
+              <h3 className="font-bold text-slate-800">Dynamic Chain Matrix</h3>
+              <div className="flex bg-slate-200/50 p-1 rounded-xl">
+                <button onClick={() => setMatrixType('call')} className={`px-6 py-1.5 rounded-lg text-xs font-black transition-all ${matrixType === 'call' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500'}`}>CALLS</button>
+                <button onClick={() => setMatrixType('put')} className={`px-6 py-1.5 rounded-lg text-xs font-black transition-all ${matrixType === 'put' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500'}`}>PUTS</button>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="bg-slate-50/50 text-[10px] font-black uppercase text-slate-400">
+                  <tr>
+                    <th className="p-4">Expiration</th>
+                    <th className="p-4">Strike</th>
+                    <th className="p-4">Bid/Ask</th>
+                    <th className="p-4">Delta</th>
+                    <th className="p-4">Theta</th>
+                    <th className="p-4">Gamma</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50 font-mono">
+                  {chainSummary.map((row, i) => (
+                    <tr key={i} className="hover:bg-slate-50">
+                      <td className="p-4 font-sans text-slate-500 flex items-center gap-2"><CalendarDays className="w-3 h-3" /> {row.expirationDate}</td>
+                      <td className="p-4 font-black">${row.strike}</td>
+                      <td className="p-4">${row.bid.toFixed(2)} / ${row.ask.toFixed(2)}</td>
+                      <td className="p-4 font-bold">{row.delta.toFixed(3)}</td>
+                      <td className="p-4 text-rose-500">-${Math.abs(row.theta * 100).toFixed(2)}</td>
+                      <td className="p-4 text-slate-400">{row.gamma.toFixed(4)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default App;
