@@ -60,8 +60,41 @@ export const ChainMatrix = ({
   // Reset to first expiry when ticker changes
   useEffect(() => { setSelectedIdx(0); }, [ticker]);
 
+  // ── ATM Straddle Calculation ──────────────────────────
+  const straddle = useMemo(() => {
+    const expData = optionsData?.options?.find(o => o.expirationDate === selectedExp?.unix);
+    
+    // Find ATM strike (closest to S)
+    let atmK;
+    if (expData) {
+      const allStrikes = [...new Set([...expData.calls.map(c => c.strike), ...expData.puts.map(p => p.strike)])];
+      atmK = allStrikes.reduce((prev, curr) => Math.abs(curr - S) < Math.abs(prev - S) ? curr : prev, allStrikes[0]);
+    } else {
+      atmK = Math.round(S);
+    }
+
+    let callPrice, putPrice;
+    if (expData) {
+      const call = expData.calls.find(c => c.strike === atmK);
+      const put  = expData.puts.find(p => p.strike === atmK);
+      callPrice = call ? (call.bid + call.ask) / 2 : calculateGreeks(S, atmK, T, r, IV, 'call').price;
+      putPrice  = put  ? (put.bid + put.ask) / 2  : calculateGreeks(S, atmK, T, r, IV, 'put').price;
+    } else {
+      callPrice = calculateGreeks(S, atmK, T, r, IV, 'call').price;
+      putPrice  = calculateGreeks(S, atmK, T, r, IV, 'put').price;
+    }
+
+    const price = callPrice + putPrice;
+    return {
+      strike: atmK,
+      price,
+      pct: (price / S) * 100,
+      upper: atmK + price,
+      lower: atmK - price,
+    };
+  }, [optionsData, selectedExp, S, T, r, IV]);
+
   // ── Real contracts for selected expiry/type ──────────────
-  // Alpha Vantage returns ALL expirations at once — no additional fetching needed
   const realContracts = useMemo(() => {
     if (!optionsData?.options || !selectedExp?.unix) return null;
     const expData = optionsData.options.find(o => o.expirationDate === selectedExp.unix);
@@ -97,6 +130,25 @@ export const ChainMatrix = ({
       const ask = (contract?.ask ?? 0) > 0 ? contract.ask : Math.max(0, +((g?.price ?? 0) + 0.05).toFixed(2));
       const mid = +((bid + ask) / 2).toFixed(2);
 
+      // ── Straddle calculation for THIS strike ─────────────
+      const otherType = matrixType === 'call' ? 'puts' : 'calls';
+      const expData   = optionsData?.options?.find(o => o.expirationDate === selectedExp?.unix);
+      const otherSide = expData?.[otherType]?.find(c => c.strike === K);
+      
+      let otherMid;
+      if (otherSide) {
+        otherMid = (otherSide.bid + otherSide.ask) / 2;
+      } else {
+        const otherG = calculateGreeks(S, K, T, r, sigma, matrixType === 'call' ? 'put' : 'call');
+        otherMid = otherG.price;
+      }
+
+      const straddlePrice = mid + otherMid;
+      const straddlePct   = (straddlePrice / S) * 100;
+
+      const expMove1   = S * sigma * Math.sqrt(T);
+      const expMove1_5 = 1.5 * expMove1;
+
       return [{
         strike:       K,
         atm:          isATM(K, S),
@@ -107,13 +159,17 @@ export const ChainMatrix = ({
         delta,
         absDelta,
         moneyness:    calcMoneyness(K, S, matrixType),
+        expMove1,
+        expMove1_5,
+        straddlePrice,
+        straddlePct,
       }];
     });
 
     return matrixType === 'call'
       ? result.sort((a, b) => a.strike - b.strike)
       : result.sort((a, b) => b.strike - a.strike);
-  }, [S, IV, r, T, matrixType, realContracts]);
+  }, [S, IV, r, T, matrixType, realContracts, optionsData, selectedExp]);
 
   const isReal    = realContracts != null;
   const atmStrike = rows.reduce((best, row) =>
@@ -204,6 +260,8 @@ export const ChainMatrix = ({
                 <ColHeader right>Bid</ColHeader>
                 <ColHeader right>Mid</ColHeader>
                 <ColHeader right>Ask</ColHeader>
+                <ColHeader right>Straddle (±%)</ColHeader>
+                <ColHeader right>Exp Move (1σ/1.5σ)</ColHeader>
                 <ColHeader right>Volume</ColHeader>
                 <ColHeader right>Open Int</ColHeader>
                 <ColHeader right>IV</ColHeader>
@@ -250,6 +308,18 @@ export const ChainMatrix = ({
                     {/* Ask */}
                     <td className="px-4 py-3 mono text-right text-slate-500 tabular-nums">
                       {row.ask > 0 ? row.ask.toFixed(2) : <span className="text-slate-800">—</span>}
+                    </td>
+
+                    {/* Straddle */}
+                    <td className="px-4 py-3 mono text-right tabular-nums">
+                      <div className="text-indigo-300 font-bold">{fmt.price(row.straddlePrice)}</div>
+                      <div className="text-slate-500 text-[9px]">±{row.straddlePct.toFixed(2)}%</div>
+                    </td>
+
+                    {/* Expected Move */}
+                    <td className="px-4 py-3 mono text-right text-[10px] tabular-nums">
+                      <div className="text-slate-300 font-bold">±{row.expMove1.toFixed(2)}</div>
+                      <div className="text-slate-500 text-[9px]">±{row.expMove1_5.toFixed(2)}</div>
                     </td>
 
                     {/* Volume */}

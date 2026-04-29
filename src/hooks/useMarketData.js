@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchQuote, fetchOptions, fetchHistory, fetchIntraday, fetchRiskFreeRate } from '../lib/yahooClient.js';
 import { computeHV, computeHVHistory, computeIVRank } from '../lib/volatility.js';
-import { MOCK_QUOTE, MOCK_OPTIONS, MOCK_HISTORY, MOCK_INTRADAY } from '../lib/mockData.js';
 
 const CACHE_TTL  = 60_000;
 const HIST_TTL   = 3_600_000;
@@ -32,14 +31,12 @@ const buildDerived = (quote, options, history, riskFreeRate) => {
 };
 
 export const useMarketData = (ticker) => {
-  const [state, setState] = useState(() => {
-    const derived = buildDerived(MOCK_QUOTE, MOCK_OPTIONS, MOCK_HISTORY, 0.045);
-    return {
-      quote: MOCK_QUOTE, options: MOCK_OPTIONS, history: MOCK_HISTORY,
-      intraday: MOCK_INTRADAY, riskFreeRate: 0.045, ...derived,
-      isLoading: true, error: null, lastUpdated: null,
-      isStale: false, isDemo: true,
-    };
+  const [state, setState] = useState({
+    quote: null, options: null, history: null,
+    intraday: null, riskFreeRate: 0.045,
+    hv30: null, hvHistory: [], iv: 0.22, ivRank: null,
+    isLoading: true, error: null, lastUpdated: null,
+    isStale: false, isDemo: false,
   });
 
   const abort = useRef(null);
@@ -71,19 +68,13 @@ export const useMarketData = (ticker) => {
 
     if (ctrl.signal.aborted) return;
 
-    // If quote itself failed, fall to demo mode for the whole ticker
+    // If quote itself failed, show error
     if (!quoteR.ok) {
-      const isMock = sym.toUpperCase() === 'AAPL';
-      const demoQuote    = isMock ? MOCK_QUOTE    : { ...MOCK_QUOTE,   ticker: sym, name: sym };
-      const demoOptions  = isMock ? MOCK_OPTIONS  : { ...MOCK_OPTIONS, ticker: sym };
-      const demoIntraday = isMock ? MOCK_INTRADAY : { ...MOCK_INTRADAY, ticker: sym };
-      const derived = buildDerived(demoQuote, demoOptions, MOCK_HISTORY, 0.045);
       setState(prev => ({
         ...prev,
-        quote: demoQuote, options: demoOptions, history: MOCK_HISTORY,
-        intraday: demoIntraday, riskFreeRate: 0.045, ...derived,
-        isLoading: false, error: null, isDemo: true,
-        lastUpdated: Date.now(), isStale: false,
+        isLoading: false,
+        error: `Failed to fetch quote for ${sym}: ${quoteR.error}`,
+        isDemo: false
       }));
       return;
     }
@@ -112,7 +103,7 @@ export const useMarketData = (ticker) => {
       quote, options, history, intraday, riskFreeRate: rfr, ...derived,
       isLoading: false,
       error: options == null && !cached.options
-        ? `Options data unavailable — chain matrix will use Black-Scholes`
+        ? `Options data unavailable for ${sym}`
         : null,
       lastUpdated: Date.now(), isStale: false, isDemo: false,
     });
