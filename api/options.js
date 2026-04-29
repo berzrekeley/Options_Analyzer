@@ -6,26 +6,22 @@ const num = (v) => parseFloat(v) || 0;
 const int = (v) => parseInt(v)   || 0;
 
 export default async function handler(req, res) {
-  const { ticker, date } = req.query;
+  const { ticker } = req.query;
   if (!ticker) return res.status(400).json({ error: 'ticker param required' });
 
   try {
-    // Yahoo Finance returns options for a specific expiration or the nearest one
-    // date should be a unix timestamp
-    const optionsResult = await yf.options(ticker.toUpperCase(), {
-      ...(date ? { date: new Date(parseInt(date) * 1000) } : {})
-    });
+    // 1. Get the list of expiration dates and the first set of options
+    const firstResult = await yf.options(ticker.toUpperCase());
 
-    if (!optionsResult || !optionsResult.options || optionsResult.options.length === 0) {
+    if (!firstResult || !firstResult.expirationDates || firstResult.expirationDates.length === 0) {
       return res.status(404).json({ error: `No options data for ${ticker}` });
     }
 
-    const expirationDates = optionsResult.expirationDates.map(d => 
-      Math.floor(new Date(d).getTime() / 1000)
-    );
+    const allDates = firstResult.expirationDates;
+    const expirationDates = allDates.map(d => Math.floor(new Date(d).getTime() / 1000));
 
-    // Map Yahoo Finance contracts to our internal format
-    const mapContract = (c) => ({
+    // 2. Map Yahoo Finance contracts to our internal format
+    const mapContract = (c, expiryDate) => ({
       strike:       num(c.strike),
       bid:          num(c.bid),
       ask:          num(c.ask),
@@ -34,9 +30,7 @@ export default async function handler(req, res) {
       iv:           num(c.impliedVolatility),
       volume:       int(c.volume),
       openInterest: int(c.openInterest),
-      // Yahoo does not provide greeks directly in the options call, 
-      // the frontend (ChainMatrix) already calculates them using Black-Scholes 
-      // when they are missing, which is perfect.
+      expirationDate: expiryDate,
       delta:        0, 
       gamma:        0,
       theta:        0,
@@ -45,29 +39,39 @@ export default async function handler(req, res) {
       inTheMoney:   !!c.inTheMoney,
     });
 
-    // Yahoo returns one expiration's worth of options at a time in the .options array
-    // but we need to return it in the format the frontend expects: [{ expirationDate, calls, puts }]
-    const currentExpiryDate = Math.floor(new Date(optionsResult.options[0].expiration).getTime() / 1000);
-    
-    const options = [{
-      expirationDate: currentExpiryDate,
-      calls: optionsResult.options[0].calls.map(mapContract).sort((a, b) => a.strike - b.strike),
-      puts:  optionsResult.options[0].puts.map(mapContract).sort((a, b) => a.strike - b.strike),
-    }];
+    // 3. Fetch the first 10 expirations in parallel to provide a rich initial experience
+    // (Yahoo Finance API is fast enough for ~10 concurrent requests)
+    const datesToFetch = allDates.slice(0, 10);
+    const results = await Promise.all(
+      datesToFetch.map(d => yf.options(ticker.toUpperCase(), { date: d }))
+    );
 
-    // ATM IV calculation
+    const options = results.map(res => {
+      const expDate = Math.floor(new Date(res.options[0].expiration).getTime() / 1000);
+      return {
+        expirationDate: expDate,
+        calls: res.options[0].calls.map(c => mapContract(c, expDate)).sort((a, b) => a.strike - b.strike),
+        puts:  res.options[0].puts.map(c => mapContract(c, expDate)).sort((a, b) => a.strike - b.strike),
+      };
+    });
+
+    // 4. ATM IV calculation based on the first expiration
+    const spotPrice = firstResult.quote?.regularMarketPrice || 0;
     let atmIV = null;
-    const spotPrice = optionsResult.quote?.regularMarketPrice || 0;
-    const allFirst = [...options[0].calls, ...options[0].puts];
-    if (allFirst.length > 0 && spotPrice > 0) {
+    if (options[0] && spotPrice > 0) {
+      const allFirst = [...options[0].calls, ...options[0].puts];
       const atm = allFirst
         .filter(c => c.iv > 0.005)
         .sort((a, b) => Math.abs(a.strike - spotPrice) - Math.abs(b.strike - spotPrice))[0];
       if (atm) atmIV = atm.iv;
     }
 
-    const strikeSet = new Set([...options[0].calls.map(c => c.strike), ...options[0].puts.map(p => p.strike)]);
-    const strikes   = Array.from(strikeSet).sort((a, b) => a - b);
+    const strikeSet = new Set();
+    options.forEach(o => {
+      o.calls.forEach(c => strikeSet.add(c.strike));
+      o.puts.forEach(p => strikeSet.add(p.strike));
+    });
+    const strikes = Array.from(strikeSet).sort((a, b) => a - b);
 
     res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=300');
     res.json({ 
