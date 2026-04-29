@@ -55,9 +55,9 @@ export const ChainMatrix = ({
             }),
           };
         })
-        .filter(e => e.dte >= 0);
+        .filter(e => e.dte >= 21 && e.dte <= 56); // Only 3–8 weeks (21–56 days)
     }
-    return getAvailableExpirations(7, 90);
+    return [];
   }, [optionsData]);
 
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -77,19 +77,16 @@ export const ChainMatrix = ({
       const allStrikes = [...new Set([...expData.calls.map(c => c.strike), ...expData.puts.map(p => p.strike)])];
       atmK = allStrikes.reduce((prev, curr) => Math.abs(curr - S) < Math.abs(prev - S) ? curr : prev, allStrikes[0]);
     } else {
-      atmK = Math.round(S);
+      return { price: 0, pct: 0, upper: S, lower: S };
     }
 
-    let callPrice, putPrice;
-    if (expData) {
-      const call = expData.calls.find(c => c.strike === atmK);
-      const put  = expData.puts.find(p => p.strike === atmK);
-      callPrice = call ? (call.bid + call.ask) / 2 : calculateGreeks(S, atmK, T, r, IV, 'call').price;
-      putPrice  = put  ? (put.bid + put.ask) / 2  : calculateGreeks(S, atmK, T, r, IV, 'put').price;
-    } else {
-      callPrice = calculateGreeks(S, atmK, T, r, IV, 'call').price;
-      putPrice  = calculateGreeks(S, atmK, T, r, IV, 'put').price;
-    }
+    const call = expData.calls.find(c => c.strike === atmK);
+    const put  = expData.puts.find(p => p.strike === atmK);
+    
+    if (!call || !put) return { price: 0, pct: 0, upper: S, lower: S };
+
+    const callPrice = (call.bid + call.ask) / 2;
+    const putPrice  = (put.bid + put.ask) / 2;
 
     const price = callPrice + putPrice;
     return {
@@ -99,7 +96,7 @@ export const ChainMatrix = ({
       upper: atmK + price,
       lower: atmK - price,
     };
-  }, [optionsData, selectedExp, S, T, r, IV]);
+  }, [optionsData, selectedExp, S]);
 
   // ── Real contracts for selected expiry/type ──────────────
   const realContracts = useMemo(() => {
@@ -111,45 +108,35 @@ export const ChainMatrix = ({
 
   // ── Build filtered rows (delta 0.10–0.40) ────────────────
   const rows = useMemo(() => {
-    let strikes;
-    if (realContracts?.length > 0) {
-      strikes = realContracts.map(c => c.strike).sort((a, b) => a - b);
-    } else {
-      const lo = Math.round((S * 0.72) / 5) * 5;
-      const hi = Math.round((S * 1.28) / 5) * 5;
-      strikes  = [];
-      for (let k = lo; k <= hi; k += 5) strikes.push(k);
-    }
+    if (!realContracts || realContracts.length === 0) return [];
+    
+    const strikes = realContracts.map(c => c.strike).sort((a, b) => a - b);
 
     const result = strikes.flatMap(K => {
-      const contract = realContracts?.find(c => c.strike === K);
-      const sigma    = (contract?.iv != null && contract.iv > 0.005) ? contract.iv : IV;
+      const contract = realContracts.find(c => c.strike === K);
+      if (!contract) return [];
 
-      // Prefer real delta from Alpha Vantage; fall back to Black-Scholes
-      const hasRealDelta = contract?.delta != null && contract.delta !== 0;
-      const delta    = hasRealDelta ? contract.delta : calculateGreeks(S, K, T, r, sigma, matrixType).delta;
+      const sigma = contract.iv;
+      if (sigma <= 0.005) return []; // Skip contracts with no IV data
+
+      // Delta calculation (preferring real data if available, but Yahoo doesn't provide it)
+      const delta    = calculateGreeks(S, K, T, r, sigma, matrixType).delta;
       const absDelta = Math.abs(delta);
 
       if (absDelta < 0.10 || absDelta > 0.40) return [];
 
-      const g   = !hasRealDelta ? calculateGreeks(S, K, T, r, sigma, matrixType) : null;
-      const bid = (contract?.bid ?? 0) > 0 ? contract.bid : Math.max(0, +((g?.price ?? 0) - 0.05).toFixed(2));
-      const ask = (contract?.ask ?? 0) > 0 ? contract.ask : Math.max(0, +((g?.price ?? 0) + 0.05).toFixed(2));
-      const mid = +((bid + ask) / 2).toFixed(2);
+      const bid = contract.bid;
+      const ask = contract.ask;
+      const mid = (bid + ask) / 2;
 
       // ── Straddle calculation for THIS strike ─────────────
       const otherType = matrixType === 'call' ? 'puts' : 'calls';
       const expData   = optionsData?.options?.find(o => o.expirationDate === selectedExp?.unix);
       const otherSide = expData?.[otherType]?.find(c => c.strike === K);
       
-      let otherMid;
-      if (otherSide) {
-        otherMid = (otherSide.bid + otherSide.ask) / 2;
-      } else {
-        const otherG = calculateGreeks(S, K, T, r, sigma, matrixType === 'call' ? 'put' : 'call');
-        otherMid = otherG.price;
-      }
+      if (!otherSide) return []; // Skip if we don't have both sides for the straddle
 
+      const otherMid = (otherSide.bid + otherSide.ask) / 2;
       const straddlePrice = mid + otherMid;
       const straddlePct   = (straddlePrice / S) * 100;
 
@@ -161,8 +148,8 @@ export const ChainMatrix = ({
         strike:       K,
         atm:          isATM(K, S),
         bid, mid, ask,
-        volume:       contract?.volume       ?? 0,
-        openInterest: contract?.openInterest ?? 0,
+        volume:       contract.volume       ?? 0,
+        openInterest: contract.openInterest ?? 0,
         iv:           sigma,
         delta,
         absDelta,
@@ -177,7 +164,7 @@ export const ChainMatrix = ({
     return matrixType === 'call'
       ? result.sort((a, b) => a.strike - b.strike)
       : result.sort((a, b) => b.strike - a.strike);
-  }, [S, IV, r, T, matrixType, realContracts, optionsData, selectedExp]);
+  }, [S, r, T, matrixType, realContracts, optionsData, selectedExp]);
 
   const isReal    = realContracts != null;
   const atmStrike = rows.reduce((best, row) =>
@@ -213,12 +200,6 @@ export const ChainMatrix = ({
         <span className="px-2 py-0.5 rounded bg-white/5 border border-white/8 mono text-[10px] text-slate-500">
           {selectedExp?.dte}d
         </span>
-
-        {!isReal && (
-          <span className="px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-400 text-[8px] font-bold uppercase tracking-wider">
-            Synthetic BS
-          </span>
-        )}
 
         {/* Call / Put toggle */}
         <div className="ml-auto flex bg-black/40 border border-white/8 rounded-lg p-0.5 text-[10px] font-bold">
@@ -382,7 +363,7 @@ export const ChainMatrix = ({
           </span>
         </div>
         <span className="mono text-[9px] text-slate-800 ml-auto">
-          {isReal ? 'Yahoo Finance live' : 'Black-Scholes synthetic'} · r {fmt.percent(r * 100)}
+          Yahoo Finance live · r {fmt.percent(r * 100)}
         </span>
       </div>
     </div>
