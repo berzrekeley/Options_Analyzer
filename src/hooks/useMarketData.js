@@ -49,6 +49,17 @@ export const useMarketData = (ticker) => {
 
     setState(prev => ({ ...prev, isLoading: true, error: null }));
 
+    // Clear old format caches or specific ticker caches if forcing
+    if (force) {
+      try {
+        Object.keys(localStorage).forEach(key => {
+          if (key.startsWith(`ot:options:${sym}`) || key.startsWith(`ot:quote:${sym}`)) {
+            localStorage.removeItem(key);
+          }
+        });
+      } catch {}
+    }
+
     // Each source is independent — one failing never blocks the others
     const cached = {
       quote:    !force && getCache(`quote:${sym}`),
