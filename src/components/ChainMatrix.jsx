@@ -41,11 +41,18 @@ export const ChainMatrix = ({
       return optionsData.expirationDates
         .map(unix => {
           const d   = new Date(unix * 1000);
-          const dte = Math.round((d - new Date()) / 86_400_000);
+          // Use Math.ceil to ensure Friday expirations don't round down to Thursday DTE
+          const dte = Math.max(0, Math.ceil((d.getTime() - Date.now()) / 86_400_000));
           return {
             dte,
             unix,
-            formatted: d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+            // Force UTC to prevent Thursday shift in US timezones
+            formatted: d.toLocaleDateString('en-US', { 
+              month: 'short', 
+              day: 'numeric', 
+              year: 'numeric',
+              timeZone: 'UTC'
+            }),
           };
         })
         .filter(e => e.dte >= 0);
@@ -146,7 +153,8 @@ export const ChainMatrix = ({
       const straddlePrice = mid + otherMid;
       const straddlePct   = (straddlePrice / S) * 100;
 
-      const expMove1   = S * sigma * Math.sqrt(T);
+      // ── Refined Expected Move (Straddle * 0.85) ───────────
+      const expMove1   = straddlePrice * 0.85;
       const expMove1_5 = 1.5 * expMove1;
 
       return [{
