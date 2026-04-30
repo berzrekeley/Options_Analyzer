@@ -67,36 +67,58 @@ export const ChainMatrix = ({
   // Reset to first expiry when ticker changes
   useEffect(() => { setSelectedIdx(0); }, [ticker]);
 
-  // ── ATM Straddle Calculation ──────────────────────────
-  const straddle = useMemo(() => {
+  // ── ATM Calculation ──────────────────────────
+  const atmInfo = useMemo(() => {
     const expData = optionsData?.options?.find(o => o.expirationDate === selectedExp?.unix);
     
-    // Find ATM strike (closest to S)
-    let atmK;
-    if (expData) {
-      const allStrikes = [...new Set([...expData.calls.map(c => c.strike), ...expData.puts.map(p => p.strike)])];
-      atmK = allStrikes.reduce((prev, curr) => Math.abs(curr - S) < Math.abs(prev - S) ? curr : prev, allStrikes[0]);
-    } else {
-      return { price: 0, pct: 0, upper: S, lower: S };
-    }
+    if (!expData) return { strike: 0, iv: IV, dailyMove: (S * IV) / 15.87 };
+
+    const allStrikes = [...new Set([...expData.calls.map(c => c.strike), ...expData.puts.map(p => p.strike)])];
+    const atmK = allStrikes.reduce((prev, curr) => Math.abs(curr - S) < Math.abs(prev - S) ? curr : prev, allStrikes[0]);
 
     const call = expData.calls.find(c => c.strike === atmK);
     const put  = expData.puts.find(p => p.strike === atmK);
     
-    if (!call || !put) return { price: 0, pct: 0, upper: S, lower: S };
+    const avgIV = (call && put) ? (call.iv + put.iv) / 2 : (call?.iv ?? put?.iv ?? IV);
+    const dailyMove = (S * avgIV) / 15.87;
 
-    const callPrice = (call.bid + call.ask) / 2;
-    const putPrice  = (put.bid + put.ask) / 2;
-
-    const price = callPrice + putPrice;
     return {
       strike: atmK,
-      price,
-      pct: (price / S) * 100,
-      upper: atmK + price,
-      lower: atmK - price,
+      iv: avgIV,
+      dailyMove
     };
-  }, [optionsData, selectedExp, S]);
+  }, [optionsData, selectedExp, S, IV]);
+
+  const dailyMove = atmInfo.dailyMove;
+
+  // ── Assessment Logic ─────────────────────────────────────
+  const getAssessment = (ratio) => {
+    const r = ratio * 100;
+    if (r < 6) return { 
+      label: 'Underpriced', 
+      color: 'text-rose-400', 
+      bg: '',
+      desc: 'Skip; reward doesn\'t justify volatility' 
+    };
+    if (r < 10) return { 
+      label: 'Fair Value', 
+      color: 'text-yellow-400', 
+      bg: 'bg-yellow-500/10',
+      desc: 'Standard for blue-chip income' 
+    };
+    if (r < 15) return { 
+      label: 'Rich Premium', 
+      color: 'text-emerald-400', 
+      bg: 'bg-emerald-500/10',
+      desc: 'Aggressive Sell; high compensation' 
+    };
+    return { 
+      label: 'Extreme', 
+      color: 'text-orange-400', 
+      bg: 'bg-orange-500/15',
+      desc: 'High value, check catalysts' 
+    };
+  };
 
   // ── Real contracts for selected expiry/type ──────────────
   const realContracts = useMemo(() => {
@@ -108,67 +130,52 @@ export const ChainMatrix = ({
 
   // ── Build filtered rows (delta 0.10–0.40) ────────────────
   const rows = useMemo(() => {
-    if (!realContracts || realContracts.length === 0) return [];
+    if (!realContracts || realContracts.length === 0 || !selectedExp) return [];
     
     const strikes = realContracts.map(c => c.strike).sort((a, b) => a - b);
+    const dte = selectedExp.dte;
 
     const result = strikes.flatMap(K => {
       const contract = realContracts.find(c => c.strike === K);
       if (!contract) return [];
 
       const sigma = contract.iv;
-      if (sigma <= 0.005) return []; // Skip contracts with no IV data
+      if (sigma <= 0.005) return [];
 
-      // Delta calculation (preferring real data if available, but Yahoo doesn't provide it)
       const delta    = calculateGreeks(S, K, T, r, sigma, matrixType).delta;
       const absDelta = Math.abs(delta);
 
       if (absDelta < 0.10 || absDelta > 0.40) return [];
 
-      const bid = contract.bid;
-      const ask = contract.ask;
-      const mid = (bid + ask) / 2;
-
-      // ── Straddle calculation for THIS strike ─────────────
-      const otherType = matrixType === 'call' ? 'puts' : 'calls';
-      const expData   = optionsData?.options?.find(o => o.expirationDate === selectedExp?.unix);
-      const otherSide = expData?.[otherType]?.find(c => c.strike === K);
-      
-      if (!otherSide) return []; // Skip if we don't have both sides for the straddle
-
-      const otherMid = (otherSide.bid + otherSide.ask) / 2;
-      const straddlePrice = mid + otherMid;
-      const straddlePct   = (straddlePrice / S) * 100;
-
-      // ── Refined Expected Move (Straddle * 0.85) ───────────
-      const expMove1   = straddlePrice * 0.85;
-      const expMove1_5 = 1.5 * expMove1;
+      const mid = (contract.bid + contract.ask) / 2;
+      const dailyIncome = mid / dte;
+      const ratio = dailyIncome / dailyMove;
 
       return [{
         strike:       K,
         atm:          isATM(K, S),
-        bid, mid, ask,
+        bid:          contract.bid,
+        mid,
+        ask:          contract.ask,
         volume:       contract.volume       ?? 0,
         openInterest: contract.openInterest ?? 0,
         iv:           sigma,
         delta,
         absDelta,
         moneyness:    calcMoneyness(K, S, matrixType),
-        expMove1,
-        expMove1_5,
-        straddlePrice,
-        straddlePct,
+        dailyIncome,
+        ratio,
+        assessment:   getAssessment(ratio),
       }];
     });
 
     return matrixType === 'call'
       ? result.sort((a, b) => a.strike - b.strike)
       : result.sort((a, b) => b.strike - a.strike);
-  }, [S, r, T, matrixType, realContracts, optionsData, selectedExp]);
+  }, [S, r, T, matrixType, realContracts, selectedExp, dailyMove]);
 
   const isReal    = realContracts != null;
-  const atmStrike = rows.reduce((best, row) =>
-    Math.abs(row.strike - S) < Math.abs((best?.strike ?? Infinity) - S) ? row : best, null)?.strike;
+  const atmStrike = atmInfo.strike;
 
   return (
     <div className="card overflow-hidden">
@@ -223,7 +230,9 @@ export const ChainMatrix = ({
       {/* ── Sub-header ──────────────────────────────────── */}
       <div className="px-5 py-2.5 border-b border-white/5 bg-black/10 flex flex-wrap items-center gap-5 text-[9px] mono text-slate-600">
         <span>Spot: <span className="text-slate-400">{fmt.price(S)}</span></span>
-        <span>IV (ATM): <span className="text-slate-400">{fmt.percent(IV * 100)}</span></span>
+        <span>Base Strike: <span className="text-indigo-400">{fmt.price(atmInfo.strike)}</span></span>
+        <span>IV (ATM): <span className="text-slate-400">{fmt.percent(atmInfo.iv * 100)}</span></span>
+        <span>Daily Move: <span className="text-emerald-400">{fmt.price(dailyMove)}</span></span>
         <span className="ml-auto">δ 0.10 – 0.40 · {rows.length} contract{rows.length !== 1 ? 's' : ''}</span>
       </div>
 
@@ -249,8 +258,9 @@ export const ChainMatrix = ({
                 <ColHeader right>Bid</ColHeader>
                 <ColHeader right>Mid</ColHeader>
                 <ColHeader right>Ask</ColHeader>
-                <ColHeader right>Straddle (±%)</ColHeader>
-                <ColHeader right>Exp Move (1σ/1.5σ)</ColHeader>
+                <ColHeader right>Daily Income</ColHeader>
+                <ColHeader right>Ratio</ColHeader>
+                <ColHeader>Assessment</ColHeader>
                 <ColHeader right>Volume</ColHeader>
                 <ColHeader right>Open Int</ColHeader>
                 <ColHeader right>IV</ColHeader>
@@ -265,7 +275,7 @@ export const ChainMatrix = ({
                     key={row.strike}
                     className={cn(
                       'transition-colors hover:bg-white/[0.03]',
-                      deltaRowBg(row.absDelta),
+                      row.assessment.bg,
                       isClosestATM && 'border-l-2 border-l-indigo-500/70 !bg-indigo-500/[0.07]'
                     )}
                   >
@@ -299,16 +309,24 @@ export const ChainMatrix = ({
                       {row.ask > 0 ? row.ask.toFixed(2) : <span className="text-slate-800">—</span>}
                     </td>
 
-                    {/* Straddle */}
-                    <td className="px-4 py-3 mono text-right tabular-nums">
-                      <div className="text-indigo-300 font-bold">{fmt.price(row.straddlePrice)}</div>
-                      <div className="text-slate-500 text-[9px]">±{row.straddlePct.toFixed(2)}%</div>
+                    {/* Daily Income */}
+                    <td className="px-4 py-3 mono text-right tabular-nums text-emerald-400 font-bold">
+                      {fmt.price(row.dailyIncome)}
                     </td>
 
-                    {/* Expected Move */}
-                    <td className="px-4 py-3 mono text-right text-[10px] tabular-nums">
-                      <div className="text-slate-300 font-bold">±{row.expMove1.toFixed(2)}</div>
-                      <div className="text-slate-500 text-[9px]">±{row.expMove1_5.toFixed(2)}</div>
+                    {/* Ratio */}
+                    <td className="px-4 py-3 mono text-right tabular-nums text-indigo-300 font-bold">
+                      {fmt.percent(row.ratio * 100, 2)}
+                    </td>
+
+                    {/* Assessment */}
+                    <td className="px-4 py-3 tabular-nums">
+                      <div className={cn('font-bold text-[10px]', row.assessment.color)}>
+                        {row.assessment.label}
+                      </div>
+                      <div className="text-[8px] text-slate-600 leading-tight">
+                        {row.assessment.desc}
+                      </div>
                     </td>
 
                     {/* Volume */}
