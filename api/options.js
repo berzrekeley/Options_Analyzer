@@ -65,11 +65,12 @@ export default async function handler(req, res) {
     const options = results
       .filter(res => res && res.options && res.options[0])
       .map(res => {
-        const expDate = Math.floor(new Date(res.options[0].expiration).getTime() / 1000);
+        const optObj = res.options[0];
+        const expDate = Math.floor(new Date(optObj.expirationDate).getTime() / 1000);
         return {
           expirationDate: expDate,
-          calls: res.options[0].calls.map(c => mapContract(c, expDate)).sort((a, b) => a.strike - b.strike),
-          puts:  res.options[0].puts.map(c => mapContract(c, expDate)).sort((a, b) => a.strike - b.strike),
+          calls: optObj.calls.map(c => mapContract(c, expDate)).sort((a, b) => a.strike - b.strike),
+          puts:  optObj.puts.map(c => mapContract(c, expDate)).sort((a, b) => a.strike - b.strike),
         };
       });
 
